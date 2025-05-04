@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>实时日志可视化监控系统</title>
+  <!-- 引入 Chart.js 用于绘图 -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    /* 页面整体样式 */
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+      background: #f4f6f8;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    /* 每台设备的数据卡片样式 */
+    .device-container {
+      background: #fff;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+      padding: 20px;
+      margin-bottom: 30px;
+    }
+
+    .device-container h2 {
+      margin-top: 0;
+      color: #333;
+    }
+
+    .device-container p {
+      margin: 6px 0;
+    }
+
+    .chart-box {
+      width: 100%;
+      height: 300px;
+      margin-top: 15px;
+    }
+  </style>
+</head>
+<body>
+<h1>分布式日志实时监控系统</h1>
+<div id="device-data"></div>
+
+<script>
+  const deviceInfo = {}; // 保存每个设备对应的图表和数据
+  const maxPoints = 20;  // 折线图上显示的最大数据点数
+  const socket = new WebSocket("ws://localhost:8080/ws"); // 建立 WebSocket 连接
+
+  // 收到后端推送消息时触发
+  socket.onmessage = ({ data }) => {
+    try {
+      const json = JSON.parse(data); // 解析 JSON 数据
+      const deviceId = json.device_id;
+      if (!deviceId) return; // 如果无设备 ID，忽略
+
+      // 如果是首次接收该设备的数据，初始化 UI 卡片
+      if (!deviceInfo[deviceId]) {
+        createDeviceCard(deviceId);
+      }
+
+      // 更新设备对应的卡片信息
+      updateDeviceCard(deviceId, json);
+    } catch (e) {
+      console.error("JSON 解析失败：", e);
+    }
+  };
+
+  // 创建设备展示卡片和图表
+  function createDeviceCard(deviceId) {
+    const container = document.createElement("div");
+    container.className = "device-container";
+    container.id = `device_${deviceId}`;
+
+    // 填充 HTML 内容
+    container.innerHTML = `
+        <h2>设备 ${deviceId}</h2>
+        <p><strong>⚠️ WARN 占比:</strong> <span class="warn-ratio">0%</span></p>
+        <p><strong>❌ ERROR 占比:</strong> <span class="error-ratio">0%</span></p>
+        <p><strong>🕒 最近一次 ERROR 时间:</strong> <span class="last-error">无</span></p>
+        <p><strong>🚨 严重告警次数:</strong> <span class="alert-count">0</span></p>
+        <div class="chart-box">
+          <canvas id="chart_${deviceId}"></canvas>
+        </div>
+      `;
+
+    document.getElementById("device-data").appendChild(container);
+
+    // 创建图表
+    const ctx = document.getElementById(`chart_${deviceId}`).getContext('2d');
+    const chart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [], // 横坐标时间
+        datasets: [
+          {
+            label: 'WARN 数量',
+            data: [],
+            borderColor: 'orange',
+            backgroundColor: 'rgba(255,165,0,0.2)',
+            tension: 0
+          },
+          {
+            label: 'ERROR 数量',
+            data: [],
+            borderColor: 'red',
+            backgroundColor: 'rgba(255,0,0,0.2)',
+            tension: 0
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        animation: { duration: 300 },
+        plugins: {
+          legend: { position: 'top' }
+        },
+        scales: {
+          x: { display: true },
+          y: {
+            beginAtZero: true,
+            ticks: { precision: 0 } // 纵轴为整数刻度
+          }
+        }
+      }
+    });
+
+    // 保存该设备对应的图表和计数器
+    deviceInfo[deviceId] = {
+      alertCount: 0,
+      chart,
+      card: container
+    };
+  }
+
+  // 将时间字符串格式化为标准时间
+  function formatDateTime(input) {
+    if (!input || input === "") return "";
+    const date = new Date(input);
+    if (isNaN(date.getTime())) return "";
+    const pad = n => n.toString().padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+            `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+
+  // 更新已有的设备卡片内容和图表数据
+  function updateDeviceCard(deviceId, data) {
+    const { card, chart } = deviceInfo[deviceId];
+
+    // 如果是告警类消息（含 alert_type 字段）
+    if (data.alert_type) {
+      deviceInfo[deviceId].alertCount++;
+      card.querySelector(".alert-count").innerText = deviceInfo[deviceId].alertCount;
+    } else {
+      // 普通分析类数据
+      const {
+        warn_count = 0,
+        error_count = 0,
+        warn_ratio = 0,
+        error_ratio = 0,
+        last_error_time = ""
+      } = data;
+
+      // 更新静态文本信息
+      card.querySelector(".warn-ratio").innerText = `${(warn_ratio * 100).toFixed(1)}%`;
+      card.querySelector(".error-ratio").innerText = `${(error_ratio * 100).toFixed(1)}%`;
+      card.querySelector(".last-error").innerText = formatDateTime(last_error_time);
+
+      // 更新图表数据
+      const time = new Date().toLocaleTimeString(); // 当前时间作为标签
+
+      if (chart.data.labels.length >= maxPoints) {
+        chart.data.labels.shift(); // 移除最早的数据
+        chart.data.datasets[0].data.shift();
+        chart.data.datasets[1].data.shift();
+      }
+
+      // 添加新数据点
+      chart.data.labels.push(time);
+      chart.data.datasets[0].data.push(warn_count);
+      chart.data.datasets[1].data.push(error_count);
+      chart.update(); // 重新渲染图表
+    }
+  }
+</script>
+</body>
+</html>
